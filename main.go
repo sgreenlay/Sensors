@@ -2,23 +2,18 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"os"
+	"io/ioutil"
 	"log"
+	"net/http"
+	"os"
 	"time"
 )
 
-type temperatureReading struct {
-	Room        string
-	Time        string
-	Temperature float64
-	Humidity    float64
-}
-
-func main() {
+func WithDatabase(op func(context.Context, *mongo.Collection)) {
 	// Retrieve connection URI
 	connecturi := os.Getenv("AZURE_COSMOSDB_CONNECTION_STRING")
 
@@ -40,39 +35,63 @@ func main() {
 
 	collection := client.Database("home").Collection("sensors")
 
-	// Change the timeout of our context
-	ctx, _ = context.WithTimeout(context.Background(), 5*time.Second)
-
-	// Create an example reading
-	reading := temperatureReading{
-		Room:        "test",
-		Time:        "2020-05-02T20:02:24.599Z",
-		Temperature: 19.0,
-		Humidity:    50.0,
-	}
-	res, err := collection.InsertOne(ctx, reading)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Inserted a single document from a struct: ", res.InsertedID)
-
-	// Get the latest reading
-	filter := bson.D{{"room", "test"}}
-	opts := options.FindOne().SetSort(bson.D{{"time", -1}})
-	var t temperatureReading
-	err = collection.FindOne(ctx, filter, opts).Decode(&t)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println(
-		"Time:", t.Time,
-		"Temperature:", t.Temperature)
+	// Perform DB operation
+	op(ctx, collection)
 
 	// Close the connection
 	err = client.Disconnect(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+type TemperatureReading struct {
+	Room        string
+	Time        string
+	Temperature float64
+	Humidity    float64
+}
+
+func setTemperature(rw http.ResponseWriter, req *http.Request) {
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	var t TemperatureReading
+	err = json.Unmarshal(body, &t)
+	if err != nil {
+		panic(err)
+	}
+
+	log.Println(t.Temperature)
+
+	WithDatabase(func(ctx context.Context, collection *mongo.Collection) {
+		_, err := collection.InsertOne(ctx, t)
+		if err != nil {
+			log.Fatal(err)
+		}
+	})
+}
+
+func getTemperature(rw http.ResponseWriter, req *http.Request) {
+
+	WithDatabase(func(ctx context.Context, collection *mongo.Collection) {
+		filter := bson.D{{"room", "test"}}
+		opts := options.FindOne().SetSort(bson.D{{"time", -1}})
+		var t TemperatureReading
+		err := collection.FindOne(ctx, filter, opts).Decode(&t)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		rw.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(rw).Encode(t)
+	})
+}
+
+func main() {
+	http.HandleFunc("/api/set", setTemperature)
+	http.HandleFunc("/api/get", getTemperature)
+	log.Fatal(http.ListenAndServe(":80", nil))
 }

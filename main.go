@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func WithDatabase(op func(context.Context, *mongo.Collection)) {
+func withDatabase(op func(context.Context, *mongo.Collection) error) error {
 	// Retrieve connection URI
 	connecturi := os.Getenv("AZURE_COSMOSDB_CONNECTION_STRING")
 
@@ -21,31 +21,36 @@ func WithDatabase(op func(context.Context, *mongo.Collection)) {
 	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
 
 	// Connect to the DB
-	config := options.Client().ApplyURI(connecturi).SetRetryWrites(false)
+	config := options.Client().ApplyURI(connecturi).SetRetryWrites(false).SetDirect(true)
 	client, err := mongo.Connect(ctx, config)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	// Ping the DB to confirm the connection
 	err = client.Ping(ctx, nil)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	collection := client.Database("home").Collection("sensors")
 
 	// Perform DB operation
-	op(ctx, collection)
+	err = op(ctx, collection)
+	if err != nil {
+		return err
+	}
 
 	// Close the connection
 	err = client.Disconnect(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
 }
 
-type TemperatureReading struct {
+type temperatureReading struct {
 	Room        string
 	Time        string
 	Temperature float64
@@ -58,36 +63,39 @@ func setTemperature(rw http.ResponseWriter, req *http.Request) {
 		panic(err)
 	}
 
-	var t TemperatureReading
+	var t temperatureReading
 	err = json.Unmarshal(body, &t)
 	if err != nil {
 		panic(err)
 	}
 
-	log.Println(t.Temperature)
-
-	WithDatabase(func(ctx context.Context, collection *mongo.Collection) {
+	err = withDatabase(func(ctx context.Context, collection *mongo.Collection) error {
 		_, err := collection.InsertOne(ctx, t)
-		if err != nil {
-			log.Fatal(err)
-		}
+		return err
 	})
+	if err != nil {
+		panic(err)
+	}
 }
 
 func getTemperature(rw http.ResponseWriter, req *http.Request) {
-
-	WithDatabase(func(ctx context.Context, collection *mongo.Collection) {
+	err := withDatabase(func(ctx context.Context, collection *mongo.Collection) error {
 		filter := bson.D{{"room", "test"}}
 		opts := options.FindOne().SetSort(bson.D{{"time", -1}})
-		var t TemperatureReading
+		var t temperatureReading
 		err := collection.FindOne(ctx, filter, opts).Decode(&t)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 
 		rw.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(rw).Encode(t)
+
+		return nil
 	})
+	if err != nil {
+		panic(err)
+	}
 }
 
 func main() {

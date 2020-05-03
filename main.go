@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func withDatabase(op func(context.Context, *mongo.Collection) error) error {
+func withDatabase(op func(*mongo.Collection) error) error {
 	// Retrieve connection URI
 	connecturi := os.Getenv("AZURE_COSMOSDB_CONNECTION_STRING")
 
@@ -36,7 +36,7 @@ func withDatabase(op func(context.Context, *mongo.Collection) error) error {
 	collection := client.Database("home").Collection("sensors")
 
 	// Perform DB operation
-	err = op(ctx, collection)
+	err = op(collection)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,8 @@ func setTemperature(rw http.ResponseWriter, req *http.Request) {
 		panic(err)
 	}
 
-	err = withDatabase(func(ctx context.Context, collection *mongo.Collection) error {
+	err = withDatabase(func(collection *mongo.Collection) error {
+		ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err := collection.InsertOne(ctx, t)
 		return err
 	})
@@ -79,10 +80,18 @@ func setTemperature(rw http.ResponseWriter, req *http.Request) {
 }
 
 func getTemperature(rw http.ResponseWriter, req *http.Request) {
-	err := withDatabase(func(ctx context.Context, collection *mongo.Collection) error {
-		filter := bson.D{{"room", "test"}}
+	rooms, ok := req.URL.Query()["room"]
+	if !ok || len(rooms[0]) < 1 {
+        log.Println("Url Param 'key' is missing")
+        return
+    }
+	
+	err := withDatabase(func(collection *mongo.Collection) error {
+		filter := bson.D{{"room", rooms[0]}}
 		opts := options.FindOne().SetSort(bson.D{{"time", -1}})
 		var t temperatureReading
+
+		ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
 		err := collection.FindOne(ctx, filter, opts).Decode(&t)
 		if err != nil {
 			return err

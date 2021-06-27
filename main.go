@@ -4,20 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func withDatabase(op func(context.Context, *mongo.Collection) error) error {
 	// Retrieve connection URI
 	connectURI, foundURI := os.LookupEnv("AZURE_COSMOSDB_CONNECTION_STRING")
-	if (!foundURI) {
+	if !foundURI {
 		return errors.New("Must set AZURE_COSMOSDB_CONNECTION_STRING")
 	}
 
@@ -39,11 +40,11 @@ func withDatabase(op func(context.Context, *mongo.Collection) error) error {
 
 	// Retrieve database collection
 	databaseName, foundDatabaseName := os.LookupEnv("SENSORS_DATABASE")
-	if (!foundDatabaseName) {
+	if !foundDatabaseName {
 		databaseName = "home"
 	}
 	collectionName, foundCollectionName := os.LookupEnv("SENSORS_COLLECTION")
-	if (!foundCollectionName) {
+	if !foundCollectionName {
 		collectionName = "sensors"
 	}
 	collection := client.Database(databaseName).Collection(collectionName)
@@ -92,29 +93,76 @@ func setTemperature(rw http.ResponseWriter, req *http.Request) {
 }
 
 func getTemperature(rw http.ResponseWriter, req *http.Request) {
-	rooms, ok := req.URL.Query()["room"]
-	if !ok || len(rooms[0]) < 1 {
-        log.Println("Url Param 'key' is missing")
-        return
-    }
-	
-	err := withDatabase(func(ctx context.Context, collection *mongo.Collection) error {
-		filter := bson.D{{"room", rooms[0]}}
-		opts := options.FindOne().SetSort(bson.D{{"time", -1}})
-		var t temperatureReading
+	rooms, roomsOk := req.URL.Query()["room"]
+	if !roomsOk || len(rooms[0]) < 1 {
+		log.Println("Url Param 'key' is missing")
+		return
+	}
 
-		err := collection.FindOne(ctx, filter, opts).Decode(&t)
+	start, startOk := req.URL.Query()["startTime"]
+	if startOk {
+		_, err := time.Parse(time.RFC3339, start[0])
 		if err != nil {
-			return err
+			log.Println("Could not parse 'startTime'")
+			return
 		}
+	}
 
-		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(t)
+	end, endOk := req.URL.Query()["endTime"]
+	if endOk {
+		_, err := time.Parse(time.RFC3339, end[0])
+		if err != nil {
+			log.Println("Could not parse 'endTime'")
+			return
+		}
+	}
+
+	err := withDatabase(func(ctx context.Context, collection *mongo.Collection) error {
+		if startOk {
+			var filter bson.D
+			if endOk {
+				filter = bson.D{{"time", bson.D{{"$gte", start[0]}, {"$lte", end[0]}}}, {"room", rooms[0]}}
+			} else {
+				filter = bson.D{{"time", bson.M{"$gte": start[0]}}, {"room", rooms[0]}}
+			}
+			opts := options.Find().SetSort(bson.D{{"time", -1}})
+
+			cur, err := collection.Find(ctx, filter, opts)
+			if err != nil {
+				return err
+			}
+			defer cur.Close(ctx)
+
+			ts := []temperatureReading{}
+			for cur.Next(ctx) {
+				var t temperatureReading
+				err := cur.Decode(&t)
+				if err != nil {
+					return err
+				}
+				ts = append(ts, t)
+			}
+
+			rw.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(rw).Encode(ts)
+		} else {
+			filter := bson.D{{"room", rooms[0]}}
+			opts := options.FindOne().SetSort(bson.D{{"time", -1}})
+			var t temperatureReading
+
+			err := collection.FindOne(ctx, filter, opts).Decode(&t)
+			if err != nil {
+				return err
+			}
+
+			rw.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(rw).Encode(t)
+		}
 
 		return nil
 	})
 	if err != nil {
-		panic(err)
+		log.Println(err)
 	}
 }
 
